@@ -1,0 +1,240 @@
+//Webservice Class to update Opportunity or to Create Opportunity based on criteria its matching. 
+@RestResource(urlMapping='/CadreCustomOpportunityApi/*')
+global with sharing class Plative_CadreOpportunityApi {
+    @HttpPost
+    global static void Cadre_Opportunity(){
+        
+        List<Integration_Log__c > integrationLogInsertList = new List<Integration_Log__c>();
+        RestRequest req = RestContext.request;
+        RestResponse response = RestContext.response;
+        string requestbody = req.requestBody.toString();
+        Cadre_OpportunityClass oppbody;
+        List<Opportunity> oppoToUpdate = new List<Opportunity>();
+        List<Opportunity> oppoToInsert = new List<Opportunity>();
+        String OppId;
+        Product2[] cadre_product;
+        
+        try{
+            //reading the request
+            oppbody = (Cadre_OpportunityClass)JSON.Deserialize(requestbody, Cadre_OpportunityClass.class);
+         	//query the cadre user
+            Cadre_User__c[] cadre_user = [Select  Id, Lead__c, Firm_ID__c, Contact__c From Cadre_User__c Where User_Id__c=:oppbody.account_id Limit 1];
+            System.debug('cadre user'+cadre_user);
+            if(cadre_user.size()==0){
+                response.statusCode = 400;
+                response.responseBody = Blob.valueOf('Cadre User not found');
+            }else{
+                //query product
+            	cadre_product = [SELECT Id, Cadre_Product_Unique_Id__c From Product2 Where Cadre_Product_Unique_Id__c=:oppbody.product_id Limit 1];
+                System.debug('cadre_product: '+cadre_product);
+            	if(cadre_product.size()==0){
+                	response.statusCode = 400;
+                	response.responseBody = Blob.valueOf('Cadre Product not found');
+            	}
+            }
+            //check if product, cadre user exist and contact is updated on cadre user
+            If(cadre_user != Null && cadre_product != Null && cadre_user[0].Contact__c != Null){
+            	Contact[] cadre_Contact = [Select Id, AccountId, RecordType.name, Account.recordtype.name from Contact where Id=: cadre_user[0].Contact__c Limit 1];
+            	System.debug('cadre_Contact: '+cadre_Contact);
+            	Map<String, Id> opptypemap = new Map<String, Id>();
+                //query recordtypes
+            	for(RecordType opprecordtype : [Select Id, developerName From RecordType where SobjectType='Opportunity']){
+            		opptypemap.put(opprecordtype.DeveloperName, opprecordtype.Id);
+            	}
+                //query opportunities
+            	List<Opportunity> cadre_Opportunities = [Select Id, Allocation_ID__c, StageName, product__c, Amount, AccountId, isClosed From Opportunity Where AccountId=:cadre_Contact[0].AccountId and (Allocation_ID__c =:oppbody.closing_id or isClosed = False) order by Allocation_ID__c nulls last, product__c nulls last, closedate Desc];
+            	System.debug('cadre_Opportunities: '+cadre_Opportunities);
+                
+            	If(cadre_Opportunities.size()>0){
+                	for(Opportunity cadre_Opportunity: cadre_Opportunities){
+                        //update opportunity if allocationId matches
+                		if(cadre_Opportunity.Allocation_ID__c != Null && cadre_Opportunity.Allocation_ID__c == oppbody.closing_id){
+            				Opportunity cadre_opp = new Opportunity();
+                			cadre_opp.StageName = oppbody.opportunity_stage;
+                			cadre_opp.Amount =  Decimal.Valueof(oppbody.subscription_amt);
+                			cadre_opp.Id = cadre_Opportunity.Id;
+                			oppoToUpdate.add(cadre_opp);
+                			 break;
+                		//update old opportunity based on close date if allocationId not present and product and cadre user matches
+                        }else if(cadre_Opportunity.product__c != Null && cadre_Opportunity.product__c == cadre_Product[0].Id && cadre_Opportunity.AccountId == cadre_Contact[0].AccountId && cadre_user[0].Contact__c != Null && cadre_Opportunity.Allocation_ID__c == Null && cadre_Opportunity.isClosed == False){
+                			Opportunity cadre_opp = new Opportunity();
+                			cadre_opp.StageName = oppbody.opportunity_stage;
+                    		cadre_opp.Allocation_ID__c = oppbody.closing_id;
+                			cadre_opp.Amount =  Decimal.Valueof(oppbody.subscription_amt);
+                        	cadre_opp.closedate = Date.valueof(oppbody.opportunity_closedate);
+                			cadre_opp.Id = cadre_Opportunity.Id;
+                			oppoToUpdate.add(cadre_opp);
+                			 break;    
+                		//create opportunity if allocationId and product not present and cadre user matches
+                        }else if(cadre_Opportunity.product__c == Null && cadre_user[0].Contact__c != Null && cadre_Opportunity.AccountId == cadre_Contact[0].AccountId && cadre_Opportunity.Allocation_ID__c == Null && cadre_Opportunity.isClosed == False){
+                			Opportunity cadre_opp = new Opportunity();
+                    		cadre_opp.Allocation_ID__c = oppbody.closing_id;
+                    		cadre_opp.Amount = Decimal.Valueof(oppbody.subscription_amt);
+                    		cadre_opp.StageName = oppbody.opportunity_stage;
+                    		cadre_opp.name = oppbody.opportunity_name;
+                    		cadre_opp.product__c = cadre_product[0].Id;
+                    		cadre_opp.closedate = Date.valueof(oppbody.opportunity_closedate);
+                            cadre_opp.Contact__c = cadre_user[0].Contact__c;
+                            cadre_opp.AccountId = cadre_Contact[0].AccountId;
+                        	If(cadre_Contact[0].Account.recordtype.name == 'Firm' || cadre_Contact[0].RecordType.name == 'Advisor/Broker' || cadre_Contact[0].RecordType.name == 'Non-Advisor/Non-Broker'){
+                        		cadre_opp.RecordTypeId = opptypemap.get('Intermediary');    
+                        	}else If(cadre_Contact[0].RecordType.name == 'Institutional Contact'){
+                        		cadre_opp.RecordTypeId = opptypemap.get('Institutional');    
+                        	}else If(cadre_Contact[0].Account.recordtype.name == 'Direct Investor'){
+                        		cadre_opp.RecordTypeId = opptypemap.get('Direct');    
+                        	}
+                    		oppoToInsert.add(cadre_opp);
+                             break;
+                		}
+                	}
+                }
+                //create opportunity if not present 
+        		if(cadre_Opportunities.size() == 0 || (oppoToUpdate.size() == 0 && oppoToInsert.size() == 0)){
+                	Opportunity cadre_opp = new Opportunity();
+                	cadre_opp.Allocation_ID__c = oppbody.closing_id;
+                	cadre_opp.Amount = Decimal.Valueof(oppbody.subscription_amt);
+                	cadre_opp.StageName = oppbody.opportunity_stage;
+                	cadre_opp.name = oppbody.opportunity_name;
+                	cadre_opp.product__c = cadre_product[0].Id;
+                	cadre_opp.closedate = Date.valueof(oppbody.opportunity_closedate);
+                	cadre_opp.Contact__c = cadre_user[0].Contact__c;
+                	cadre_opp.AccountId = cadre_Contact[0].AccountId;
+                	If(cadre_Contact[0].Account.recordtype.name == 'Firm' || cadre_Contact[0].RecordType.name == 'Advisor/Broker' || cadre_Contact[0].RecordType.name == 'Non-Advisor/Non-Broker'){
+                		cadre_opp.RecordTypeId = opptypemap.get('Intermediary');    
+                	}else If(cadre_Contact[0].RecordType.name == 'Institutional Contact'){
+                		cadre_opp.RecordTypeId = opptypemap.get('Institutional');    
+                	}else If(cadre_Contact[0].Account.recordtype.name == 'Direct Investor'){
+                		cadre_opp.RecordTypeId = opptypemap.get('Direct');    
+                	}
+                	oppoToInsert.add(cadre_opp);
+            
+        		}
+            //convert lead if contact is not present and lead present on cadre user
+            }else if(cadre_user[0].Contact__c == Null && cadre_user[0].Lead__c != null){
+        	Lead[] Cadre_lc = [Select Id, Name, Email, isConverted from Lead Where Id =:cadre_user[0].Lead__c And isConverted=false];
+            if(cadre_lc.size() > 0){
+                OppId = Cadre_Convert_Lead(Cadre_lc[0].Id, cadre_Product[0].Id, cadre_user[0], requestbody, response);
+            }else{
+            	response.statusCode = 400;
+                response.responseBody = Blob.valueOf('Open Lead not found');    
+            }
+		}
+        
+		if(oppoToUpdate.size() > 0){
+        	update oppoToUpdate;
+            response.statusCode = 200;
+            response.responseBody = Blob.valueOf('Success: Updated Opportunity Id: '+oppoToUpdate[0].Id);
+        }
+        if(oppoToInsert.size() > 0){
+        	insert oppoToInsert;
+            response.statusCode = 200;
+            response.responseBody = Blob.valueOf('Success: Inserted Opportunity Id: '+oppoToInsert[0].Id);
+		}
+        if(OppId != Null){
+        	response.statusCode = 200;
+            response.responseBody = Blob.valueOf('Success: Converted Opportunity Id: '+OppId);    
+        }
+        Plative_IntegrationLog intLog = new Plative_IntegrationLog(String.valueOf(req.requestURI), 'Cadre to Salesforce', String.valueOf(req.headers), String.valueOf(req), String.valueOf(response.statusCode), response.responseBody.tostring(),String.valueOf(response.statusCode)=='400' ? response.responseBody.tostring() : NULL , String.valueOf(response.statusCode)=='200' ? true : false);
+		integrationLogInsertList.add(intLog.logObject);
+        System.debug('integrationLogInsertList: '+integrationLogInsertList);
+
+        }catch(Exception e){
+            response.statusCode = 400;
+            response.responseBody = Blob.valueOf(e.getMessage());
+            Plative_IntegrationLog intLog = new Plative_IntegrationLog(String.valueOf(req.requestURI), 'Cadre to Salesforce', String.valueOf(req.headers), String.valueOf(req), String.valueOf(response.statusCode), response.responseBody.tostring(),String.valueOf(response.statusCode)=='400' ? response.responseBody.tostring() : NULL , String.valueOf(response.statusCode)=='200' ? true : false);
+			integrationLogInsertList.add(intLog.logObject);
+        }
+        if(integrationLogInsertList.size() > 0)
+        	insert integrationLogInsertList;  
+    }
+    //Lead conversion method
+    global static String Cadre_Convert_Lead(Id cadre_Lead_Id, Id cadre_Product_Id, Cadre_User__c CadreUser, String RequestBody, RestResponse response){
+        Cadre_OpportunityClass reqBody;
+        reqBody = (Cadre_OpportunityClass)JSON.Deserialize(requestbody, Cadre_OpportunityClass.class);
+        LeadStatus convertStatus = [SELECT Id, MasterLabel FROM LeadStatus WHERE IsConverted=true LIMIT 1];
+        Database.LeadConvert lc = new Database.LeadConvert();
+        lc.setLeadId(cadre_Lead_Id);
+        
+        lc.setConvertedStatus(convertStatus.MasterLabel);
+        lc.setDoNotCreateOpportunity(False); 
+        try{
+              Database.LeadConvertResult lcResults = Database.convertLead(lc);
+              System.debug('lead conversion'+lcResults.isSuccess());
+
+              Lead convertedLead = [Select Id, Name, Email, RecordTypeId, RecordType.Name, ConvertedAccountId, ConvertedContactId, ConvertedOpportunityId, isConverted from Lead Where Id=:cadre_Lead_Id and isConverted = True];
+			  System.debug('Converted Lead: '+convertedLead);
+              Map<String, Id> acctypemap = new Map<String, Id>();
+              for(RecordType accrecordtype : [Select Id, developerName From RecordType where SobjectType='Account']){
+                 acctypemap.put(accrecordtype.DeveloperName, accrecordtype.Id);
+              }
+            
+              Map<String, Id> contypemap = new Map<String, Id>();
+              for(RecordType conrecordtype : [Select Id, developerName From RecordType where SobjectType='Contact']){
+                 contypemap.put(conrecordtype.DeveloperName, conrecordtype.Id);
+              }
+            
+              Map<String, Id> opptypemap = new Map<String, Id>();
+              for(RecordType opprecordtype : [Select Id, developerName From RecordType where SobjectType='Opportunity']){
+                 opptypemap.put(opprecordtype.DeveloperName, opprecordtype.Id);
+              }
+            
+              Account leadacc = new Account();
+              leadacc.Id = convertedLead.ConvertedAccountId;
+
+              Contact leadcon = new Contact();
+              leadcon.Id = convertedLead.ConvertedContactId;
+                  
+              Opportunity leadopp = new Opportunity();
+              leadopp.Id = convertedLead.ConvertedOpportunityId;
+              leadopp.Allocation_ID__c = reqBody.closing_id;
+              leadopp.Amount = Decimal.Valueof(reqBody.subscription_amt);
+              leadopp.CloseDate = Date.valueof(reqBody.opportunity_closedate);
+              leadopp.Product__c = cadre_Product_Id;
+              leadopp.StageName = reqBody.opportunity_stage;
+              leadopp.Name = reqBody.opportunity_name;
+              leadopp.Contact__c = convertedLead.ConvertedContactId;
+            
+              if(convertedLead.RecordType.Name.equals('Intermediary')){
+                  if(acctypemap.containsKey('Firm')){
+                      leadacc.RecordTypeId =  acctypemap.get('Firm');
+                      leadopp.RecordTypeId = opptypemap.get('Intermediary');
+                  }
+                  if(contypemap.containsKey('Advisor_Broker') && !string.Isblank(CadreUser.Firm_ID__c)){
+                      leadcon.RecordTypeId = contypemap.get('Advisor_Broker');
+                      leadopp.RecordTypeId = opptypemap.get('Intermediary');
+                  }
+                  else{
+                      leadcon.RecordTypeId = contypemap.get('Non_Advisor_Non_Broker');
+                      leadopp.RecordTypeId = opptypemap.get('Intermediary');
+                  }
+              }else if(convertedLead.RecordType.Name.equals('Direct Investor')){
+                 if(acctypemap.containsKey('Direct_Investor')){
+                     leadacc.RecordTypeId =  acctypemap.get('Direct_Investor');
+                     leadopp.RecordTypeId = opptypemap.get('Direct');
+                 }
+              }
+              update leadacc;
+              update leadcon;
+	          Update leadopp;
+            
+            if(CadreUser.Contact__c==null)
+            	CadreUser.Contact__c = convertedLead.ConvertedContactId;
+           	    update CadreUser;
+            return leadopp.Id;
+         }Catch(Exception exp){
+             response.statusCode = 400;
+             response.responseBody = Blob.valueOf(exp.getMessage());
+             return null;
+         }
+    }   
+ 	//wrapper class for request
+    public class Cadre_OpportunityClass{
+        public string product_id;   
+        public string account_id;
+        public string closing_id;
+        public string subscription_amt;
+        public string opportunity_stage;
+        public string opportunity_name;
+        public string opportunity_closedate;
+    }
+}
